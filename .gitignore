@@ -1,0 +1,5 @@
+# Supabase CLI local state — machine-specific, not meant to be shared
+.temp/
+.branches/
+.env
+.env.local
