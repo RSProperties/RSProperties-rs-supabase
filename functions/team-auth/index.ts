@@ -276,6 +276,37 @@ serve(async (req) => {
       return json({ ok: true, name: pending.name || "", email: pending.email || "", role: pending.role || "member" });
     }
 
+    // ---------------- LOGIN LOOKUP (unauthenticated, by email) ----------------
+    // 2026-09-11: team_users SELECT used to be USING(true) for {public} -
+    // anyone with the anon key could dump the entire roster (name/email/
+    // role/permissions for every member). Closing that (see
+    // sql_migrations/2026-09-11_team_users_select_lockdown.sql) means the
+    // pre-login screen (submitLogin's _tuByEmail, before any auth token
+    // exists) can no longer read team_users directly - it needs this
+    // instead. Returns the exact same non-secret column set the client
+    // used to read directly (TU_SAFE_COLS in index.html), for ONE email
+    // the caller already typed in - never the roster. Lightly rate-limited
+    // (same mechanism as verify_password) so it can't be used to bulk-
+    // enumerate valid emails.
+    if (action === "login_lookup") {
+      const email = String(body.email || "").trim().toLowerCase();
+      if (!email) return json({ error: "missing_email" }, 400);
+
+      const rlKey = `team_lookup:${email}:${ip}`;
+      const rl = await checkRateLimit(rlKey);
+      if (!rl.ok) return json({ error: "rate_limited", retryAfterSec: rl.retryAfterSec }, 429);
+      await recordAttempt(rlKey);
+
+      const r = await fetch(
+        `${SB_URL}/rest/v1/team_users?select=${SAFE_COLS.replace(",invite_token", "")}&email=eq.${encodeURIComponent(email)}&limit=1`,
+        { headers: sbHeaders() },
+      );
+      const rows = await r.json().catch(() => []);
+      const u = Array.isArray(rows) ? rows[0] : null;
+      if (!u) return json({ ok: true, found: false });
+      return json({ ok: true, found: true, user: u });
+    }
+
     // ---------------- ACTIVATE INVITE ----------------
     if (action === "activate_invite") {
       const inviteToken = String(body.inviteToken || "");
