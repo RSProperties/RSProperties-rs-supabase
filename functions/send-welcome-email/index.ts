@@ -10,6 +10,7 @@
 // reintroduce em-dashes, arrows, or emoji here - use "-", "->", plain words.
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { logResend } from "../_shared/email_log.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -65,6 +66,8 @@ serve(async (req) => {
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
+<meta name="color-scheme" content="light only"/>
+<meta name="supported-color-schemes" content="light"/>
 <title>${subject}</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -275,6 +278,12 @@ Questions? Contact us at ${safeEmail}
     });
 
     const result = await resendRes.json();
+    await logResend(resendRes, result, {
+      to: Array.isArray(toList) ? toList.join(", ") : String(toList),
+      subject,
+      template: "owner-welcome",
+      meta: { from: fromAddr },
+    });
 
     if (!resendRes.ok) {
       console.error("Resend error:", result);
