@@ -56,6 +56,66 @@ async function sha256hex(str: string): Promise<string> {
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// ---------------- 2FA / TOTP (2026-09-24, opt-in, admin-only) ----------------
+// RFC 6238 (TOTP) over RFC 4226 (HOTP), HMAC-SHA1, 6 digits, 30s step -
+// the same algorithm every authenticator app (Google Authenticator, Authy,
+// 1Password, etc.) implements, so no companion app or QR library is
+// needed here - a manually-typed base32 secret is universally supported.
+// Implemented inline with crypto.subtle (same primitive pbkdf2Hash above
+// already uses) rather than pulling in a dependency for something this
+// short and this well-specified.
+const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+function base32Encode(bytes: Uint8Array): string {
+  let bits = "";
+  for (const b of bytes) bits += b.toString(2).padStart(8, "0");
+  let out = "";
+  for (let i = 0; i + 5 <= bits.length; i += 5) out += BASE32_ALPHABET[parseInt(bits.slice(i, i + 5), 2)];
+  const rem = bits.length % 5;
+  if (rem > 0) out += BASE32_ALPHABET[parseInt(bits.slice(bits.length - rem).padEnd(5, "0"), 2)];
+  return out;
+}
+function base32Decode(b32: string): Uint8Array {
+  const clean = b32.toUpperCase().replace(/[^A-Z2-7]/g, "");
+  let bits = "";
+  for (const c of clean) {
+    const val = BASE32_ALPHABET.indexOf(c);
+    if (val === -1) continue;
+    bits += val.toString(2).padStart(5, "0");
+  }
+  const bytes: number[] = [];
+  for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
+  return new Uint8Array(bytes);
+}
+function randomBase32Secret(byteLen = 20): string {
+  return base32Encode(crypto.getRandomValues(new Uint8Array(byteLen)));
+}
+async function totpCodeAt(secretB32: string, stepOffset: number): Promise<string> {
+  const key = base32Decode(secretB32);
+  const counter = Math.floor(Date.now() / 1000 / 30) + stepOffset;
+  const counterBytes = new ArrayBuffer(8);
+  new DataView(counterBytes).setBigUint64(0, BigInt(counter));
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const hmac = new Uint8Array(await crypto.subtle.sign("HMAC", cryptoKey, counterBytes));
+  const offset = hmac[hmac.length - 1] & 0xf;
+  const binCode =
+    ((hmac[offset] & 0x7f) << 24) |
+    ((hmac[offset + 1] & 0xff) << 16) |
+    ((hmac[offset + 2] & 0xff) << 8) |
+    (hmac[offset + 3] & 0xff);
+  return String(binCode % 1000000).padStart(6, "0");
+}
+// Accepts the current 30s step and one step on either side, so a code
+// typed right at a step boundary (or a slightly-off device clock) isn't
+// rejected - the same tolerance window most TOTP implementations use.
+async function totpVerify(secretB32: string, code: string): Promise<boolean> {
+  const clean = String(code || "").replace(/\s/g, "");
+  if (!/^\d{6}$/.test(clean)) return false;
+  for (const offset of [0, -1, 1]) {
+    if ((await totpCodeAt(secretB32, offset)) === clean) return true;
+  }
+  return false;
+}
+
 // ---------------- Phase 3 (2026-09-07): real Supabase Auth accounts ----------------
 // reports/workspace/warehouse RLS now key off auth.uid(), so every
 // team_users row needs a matching auth.users account. These two helpers
@@ -149,27 +209,38 @@ async function clearRateLimit(key: string): Promise<void> {
 // themselves - they run with the service role, which bypasses RLS.
 // callerToken is the caller's own Supabase Auth access token
 // (window._authToken on the client).
-async function isCallerTeamAdmin(callerToken: string): Promise<boolean> {
-  if (!callerToken) return false;
+// Resolves a bearer token (the caller's OWN Supabase Auth session) to
+// their team_users row - used both by isCallerTeamAdmin below and by the
+// TOTP setup/disable actions, which must only ever act on the caller's
+// own account (never a client-supplied teamUserId) so one admin can
+// never set up or tamper with another admin's second factor.
+async function resolveCallerTeamUser(
+  callerToken: string,
+): Promise<{ id: string; email: string; role: string; active: boolean; permissions: unknown; password: string; totp_enabled: boolean } | null> {
+  if (!callerToken) return null;
   try {
     const ur = await fetch(`${SB_URL}/auth/v1/user`, {
       headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${callerToken}` },
     });
-    if (!ur.ok) return false;
+    if (!ur.ok) return null;
     const uj = await ur.json();
     const uid = uj && uj.id;
-    if (!uid) return false;
+    if (!uid) return null;
     const tr = await fetch(
-      `${SB_URL}/rest/v1/team_users?select=active,role,permissions&auth_user_id=eq.${encodeURIComponent(uid)}&limit=1`,
+      `${SB_URL}/rest/v1/team_users?select=id,email,role,active,permissions,password,totp_enabled&auth_user_id=eq.${encodeURIComponent(uid)}&limit=1`,
       { headers: sbHeaders() },
     );
     const trows = await tr.json();
     const tu = Array.isArray(trows) ? trows[0] : null;
-    if (!tu || tu.active !== true) return false;
-    return tu.role === "admin" || (tu.permissions && tu.permissions.team === "edit");
+    return tu && tu.active === true ? tu : null;
   } catch {
-    return false;
+    return null;
   }
+}
+async function isCallerTeamAdmin(callerToken: string): Promise<boolean> {
+  const tu = await resolveCallerTeamUser(callerToken);
+  if (!tu) return false;
+  return tu.role === "admin" || (tu.permissions && (tu.permissions as Record<string, unknown>).team === "edit");
 }
 // Whether ANY active admin exists yet - the one case admin_create_member
 // is allowed with no caller (first-run setup).
@@ -196,13 +267,14 @@ serve(async (req) => {
     if (action === "verify_password") {
       const email = String(body.email || "").trim().toLowerCase();
       const password = String(body.password || "");
+      const totpCode = body.totpCode != null ? String(body.totpCode) : "";
       if (!email || !password) return json({ error: "missing_fields" }, 400);
 
       const rlKey = `team_login:${email}:${ip}`;
       const rl = await checkRateLimit(rlKey);
       if (!rl.ok) return json({ error: "rate_limited", retryAfterSec: rl.retryAfterSec }, 429);
 
-      const r = await fetch(`${SB_URL}/rest/v1/team_users?select=id,password,auth_user_id&email=eq.${encodeURIComponent(email)}&limit=1`, {
+      const r = await fetch(`${SB_URL}/rest/v1/team_users?select=id,password,auth_user_id,totp_secret,totp_enabled&email=eq.${encodeURIComponent(email)}&limit=1`, {
         headers: sbHeaders(),
       });
       const rows = await r.json();
@@ -227,6 +299,21 @@ serve(async (req) => {
       if (!ok) {
         await recordAttempt(rlKey);
         return json({ error: "wrong_password" }, 401);
+      }
+
+      // 2FA (opt-in, admin-only - see the 2026-09-24 CLAUDE.md entry): a
+      // correct password alone doesn't finish a 2FA-enabled login, so the
+      // rate-limit counter stays live and Auth/session issuance is held
+      // until the code also checks out. Never reveal which factor was
+      // wrong - same generic "wrong_password" error either way, so a
+      // brute-force attempt can't distinguish "bad password" from "bad
+      // code" and narrow its search.
+      if (u.totp_enabled && u.totp_secret) {
+        if (!totpCode) return json({ ok: true, needsTotp: true });
+        if (!(await totpVerify(u.totp_secret, totpCode))) {
+          await recordAttempt(rlKey);
+          return json({ error: "wrong_password" }, 401);
+        }
       }
 
       if (!u.password.startsWith("pbkdf2$")) {
@@ -455,6 +542,85 @@ serve(async (req) => {
       });
       if (!pr.ok) return json({ error: "save_failed" }, 500);
       return json({ ok: true, inviteToken: token });
+    }
+
+    // ---------------- 2FA: BEGIN SETUP (self-service, admin-only) ----------------
+    // Resolves the caller's own row from their session token - never a
+    // client-supplied id - so this can only ever act on the account making
+    // the request. Generates a fresh secret and stores it with
+    // totp_enabled still false; totp_setup_confirm below is what actually
+    // turns it on, once the caller proves they can generate a real code
+    // from it.
+    if (action === "totp_setup_init") {
+      const caller = await resolveCallerTeamUser(String(body.callerToken || ""));
+      if (!caller) return json({ error: "forbidden" }, 403);
+      if (caller.role !== "admin") return json({ error: "forbidden" }, 403);
+
+      const secret = randomBase32Secret();
+      const pr = await fetch(`${SB_URL}/rest/v1/team_users?id=eq.${encodeURIComponent(caller.id)}`, {
+        method: "PATCH",
+        headers: sbHeaders({ Prefer: "return=minimal" }),
+        body: JSON.stringify({ totp_secret: secret, totp_enabled: false }),
+      });
+      if (!pr.ok) return json({ error: "save_failed" }, 500);
+
+      const label = encodeURIComponent(`Keystone:${caller.email}`);
+      const otpauthUrl = `otpauth://totp/${label}?secret=${secret}&issuer=Keystone&algorithm=SHA1&digits=6&period=30`;
+      return json({ ok: true, secret, otpauthUrl });
+    }
+
+    // ---------------- 2FA: CONFIRM SETUP ----------------
+    if (action === "totp_setup_confirm") {
+      const caller = await resolveCallerTeamUser(String(body.callerToken || ""));
+      if (!caller) return json({ error: "forbidden" }, 403);
+      if (caller.role !== "admin") return json({ error: "forbidden" }, 403);
+
+      const rlKey = `team_totp:${caller.email}:${ip}`;
+      const rl = await checkRateLimit(rlKey);
+      if (!rl.ok) return json({ error: "rate_limited", retryAfterSec: rl.retryAfterSec }, 429);
+
+      const sr = await fetch(`${SB_URL}/rest/v1/team_users?select=totp_secret&id=eq.${encodeURIComponent(caller.id)}&limit=1`, {
+        headers: sbHeaders(),
+      });
+      const srows = await sr.json().catch(() => []);
+      const secret = Array.isArray(srows) && srows[0] ? srows[0].totp_secret : null;
+      if (!secret) return json({ error: "no_pending_setup" }, 400);
+
+      if (!(await totpVerify(secret, String(body.code || "")))) {
+        await recordAttempt(rlKey);
+        return json({ error: "wrong_code" }, 401);
+      }
+      await clearRateLimit(rlKey);
+
+      const pr = await fetch(`${SB_URL}/rest/v1/team_users?id=eq.${encodeURIComponent(caller.id)}`, {
+        method: "PATCH",
+        headers: sbHeaders({ Prefer: "return=minimal" }),
+        body: JSON.stringify({ totp_enabled: true }),
+      });
+      if (!pr.ok) return json({ error: "save_failed" }, 500);
+      return json({ ok: true });
+    }
+
+    // ---------------- 2FA: DISABLE (self-service, requires current password) ----------------
+    if (action === "totp_disable") {
+      const caller = await resolveCallerTeamUser(String(body.callerToken || ""));
+      if (!caller) return json({ error: "forbidden" }, 403);
+
+      const password = String(body.password || "");
+      if (!password) return json({ error: "missing_fields" }, 400);
+      let ok = false;
+      if (caller.password && caller.password.startsWith("pbkdf2$")) ok = await pbkdf2Verify(password, caller.password);
+      else if (caller.password && /^[a-f0-9]{64}$/i.test(caller.password)) ok = (await sha256hex(password)) === caller.password;
+      else if (caller.password && caller.password === password) ok = true;
+      if (!ok) return json({ error: "wrong_password" }, 401);
+
+      const pr = await fetch(`${SB_URL}/rest/v1/team_users?id=eq.${encodeURIComponent(caller.id)}`, {
+        method: "PATCH",
+        headers: sbHeaders({ Prefer: "return=minimal" }),
+        body: JSON.stringify({ totp_secret: null, totp_enabled: false }),
+      });
+      if (!pr.ok) return json({ error: "save_failed" }, 500);
+      return json({ ok: true });
     }
 
     return json({ error: "unknown_action" }, 400);
