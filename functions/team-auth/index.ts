@@ -15,8 +15,12 @@ const CORS = {
 
 const SB_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+// totp_enabled added 2026-09-24 — a boolean, safe to expose (never
+// totp_secret itself), needed client-side so submitLogin() knows whether
+// to route a login through the 2FA-aware path before any auth call is
+// made, and so the Team Members admin list can show 2FA status.
 const SAFE_COLS =
-  "id,name,email,role,permissions,active,created_at,last_login,invite_token,name_locked";
+  "id,name,email,role,permissions,active,created_at,last_login,invite_token,name_locked,totp_enabled";
 
 function sbHeaders(extra?: Record<string, string>) {
   return Object.assign(
