@@ -85,6 +85,11 @@ function heading(text: string) {
 function labelValue(label: string, value: string) {
   return new Paragraph({ spacing: { after: 60 }, children: [new TextRun({ text: label + ": ", bold: true, size: 20 }), new TextRun({ text: value || "-", size: 20 })] });
 }
+function formatDateSk(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
+  if (!m) return iso || "";
+  return `${parseInt(m[3], 10)}.${parseInt(m[2], 10)}.${m[1]}`;
+}
 function headerCell(text: string, width: number) {
   return new TableCell({ width: { size: width, type: WidthType.DXA }, borders: CELL_BORDERS, shading: { fill: "F2EFE9" }, children: [new Paragraph({ children: [new TextRun({ text, bold: true, size: 18 })] })] });
 }
@@ -143,7 +148,7 @@ function buildDoc(p: Payload) {
     heading("Základné údaje"),
     labelValue("Názov bytu / projektu", p.name || ""),
     labelValue("Adresa", p.address || ""),
-    labelValue("Dátum prevzatia", p.date || ""),
+    labelValue("Dátum prevzatia", formatDateSk(p.date || "")),
     labelValue("Kontakt na majiteľa", p.contactMajitel || ""),
     labelValue("Zástupca RS Properties", p.rsRep || ""),
 
