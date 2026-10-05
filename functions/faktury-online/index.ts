@@ -165,6 +165,7 @@ function buildCreatePayload(b: any) {
       if (i.priceVat != null && i.price == null) row.p_pricevat = num(i.priceVat);
       else row.p_price = num(i.price);
       if (i.vat != null) row.p_vat = num(i.vat);
+      if (i.regime != null && Number(i.regime) > 0) row.p_regime = Math.min(6, Math.floor(Number(i.regime)));
       return row;
     }),
   };
