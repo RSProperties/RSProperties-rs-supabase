@@ -119,6 +119,26 @@ async function leftoverTestInvoices(s: FoSession): Promise<string[]> {
   return (r.invoices || []).filter((i: any) => TEST_NAME.test(String(i.customer || ""))).map((i: any) => String(i.invoice_number));
 }
 
+// Faktury Online numbers an invoice itself, but when the API call carries no variable symbol it copies
+// the number verbatim ("2026-0058"), while a manual invoice gets digits only ("20260058") — and a bank
+// variable symbol must be numeric. So for a plain invoice (type 1) we predict the number FO is about to
+// assign (latest invoice of that supplier + 1, same format/padding) and send its digits as f_vs.
+// The prediction is only ever used for the VS; after creation we compare it with the real number.
+const SUPPLIER_KEY: Record<number, RegExp> = { 48103: /properties/i, 74800: /prime/i, 89249: /sport/i };
+function predictNextNumber(rows: any[], supplierId: number): string {
+  const re = SUPPLIER_KEY[supplierId];
+  if (!re) return "";
+  const mine = rows.filter((i: any) => i.invoice_type === "faktura" && re.test(String(i.supplier || "")) && /\d/.test(String(i.invoice_number || "")));
+  if (!mine.length) return "";
+  mine.sort((a: any, b: any) =>
+    String(a.invoice_date_issue || "").localeCompare(String(b.invoice_date_issue || "")) ||
+    Number(String(a.invoice_number).replace(/\D/g, "")) - Number(String(b.invoice_number).replace(/\D/g, "")));
+  const last = String(mine[mine.length - 1].invoice_number);
+  const m = last.match(/^(.*?)(\d+)$/);
+  if (!m) return "";
+  return m[1] + String(Number(m[2]) + 1).padStart(m[2].length, "0");
+}
+
 function buildCreatePayload(b: any) {
   const c = b.customer || {};
   const d = b.doc || {};
@@ -214,9 +234,24 @@ serve(async (req) => {
             return reply({ ok: false, error: "test_invoice_pending", message: `Vo Faktúry Online ešte existuje testovacia faktúra (${left.join(", ")}). Počkaj, kým sa sama zmaže (do ~10 min), inak by skutočná faktúra dostala vyššie číslo a v číslovaní vznikne diera.`, leftover: left }, 409);
           }
         }
+        // numeric variable symbol for hyphenated number series (see predictNextNumber)
+        let predicted = "";
+        const fo: any = payload.f;
+        if (fo && Number(fo.f_type) === 1 && !fo.f_number && !fo.f_vs) {
+          if (!(await s.init())) return reply({ ok: false, error: "init failed" }, 502);
+          const dfrom = new Date(Date.now() - 400 * 864e5).toISOString().slice(0, 10);
+          const dto = new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+          const ex2 = await s.call("list/created", { from: dfrom, to: dto });
+          if (ex2?.status === 1) {
+            predicted = predictNextNumber(ex2.invoices || [], Number(b.supplierId) || DEFAULT_SUPPLIER_ID);
+            if (predicted && /\D/.test(predicted)) fo.f_vs = predicted.replace(/\D/g, "");
+          }
+        }
         const r = await s.call("nf", payload, false);
         if (r?.status !== 1) return reply({ ok: false, status: r?.status, error: `Faktury Online error ${r?.status}` }, 422);
-        return reply({ ok: true, code: r.code, number: r.number, created: r.created, apitest: !!b.apitest });
+        const vsSent = fo?.f_vs ? String(fo.f_vs) : "";
+        const vsMismatch = !!vsSent && String(r.number).replace(/\D/g, "") !== vsSent;
+        return reply({ ok: true, code: r.code, number: r.number, created: r.created, apitest: !!b.apitest, vs: vsSent || String(r.number), vsMismatch });
       }
       case "status": {
         const codes: string[] = (Array.isArray(b.codes) ? b.codes : []).filter((c: unknown) => typeof c === "string").slice(0, 60);
