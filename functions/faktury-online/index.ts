@@ -132,7 +132,14 @@ function buildCreatePayload(b: any) {
     f_currency: str(d.currency || "EUR", 3),
     f_payment: "prevod",
   };
-  if (d.number) f.f_number = str(d.number, 30);
+  // Type: 1 invoice, 2 proforma, 3 credit note, 4 debit note, 5 tax doc for a received payment.
+  // Type 1 is ALWAYS numbered by Faktury Online (never pass f_number); the other types use
+  // the user's manual series (ZA..., DD..., "DOBROPIS <invoice>") supplied by the caller.
+  const type = [1, 2, 3, 4, 5].includes(Number(d.type)) ? Number(d.type) : 1;
+  f.f_type = type;
+  if (type !== 1 && d.number) f.f_number = str(d.number, 40);
+  if ((type === 3 || type === 4) && d.originalNum) f.f_original_num = str(d.originalNum, 40);
+  if (type === 5 && d.paymentDate) f.f_date_payment = str(d.paymentDate, 10);
   if (d.vs) f.f_vs = str(d.vs, 20);
   if (d.issue) f.f_date_issue = str(d.issue, 10);
   if (d.delivery) f.f_date_delivery = str(d.delivery, 10);
@@ -188,6 +195,16 @@ serve(async (req) => {
       }
       case "create": {
         const payload: Record<string, unknown> = buildCreatePayload(b);
+        const wantNum = (payload.f as any)?.f_number;
+        if (wantNum) {
+          if (!(await s.init())) return reply({ ok: false, error: "init failed" }, 502);
+          const from = new Date(Date.now() - 900 * 864e5).toISOString().slice(0, 10);
+          const to = new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+          const ex = await s.call("list/created", { from, to });
+          if (ex?.status !== 1) throw new Error(`cannot verify number uniqueness (status ${ex?.status})`);
+          const dup = (ex.invoices || []).find((i: any) => String(i.invoice_number).trim().toLowerCase() === String(wantNum).trim().toLowerCase());
+          if (dup) return reply({ ok: false, error: "duplicate_number", message: `Číslo ${wantNum} už vo Faktúry Online existuje (${dup.customer}). Zvoľ iné.` }, 409);
+        }
         if (b.apitest) payload.apitest = 1;
         else {
           if (!(await s.init())) return reply({ ok: false, error: "init failed" }, 502);
