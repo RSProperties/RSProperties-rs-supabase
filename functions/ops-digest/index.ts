@@ -179,7 +179,28 @@ serve(async (req) => {
     const failedRows = await failedRes.json().catch(() => []);
     const failedEmailCount = Array.isArray(failedRows) ? failedRows.length : 0;
 
-    const allClear = lockedOut.length === 0 && integrityIssues.length === 0 && backupOk && failedEmailCount === 0;
+    // ── 5. App errors reported by browsers in the last 24h (client_errors, 2026-10-20) ──
+    let appErrorRows: string[] = [];
+    try {
+      const errRes = await fetch(
+        `${SB_URL}/rest/v1/client_errors?select=kind,message,user_name&created_at=gte.${encodeURIComponent(since)}&limit=500`,
+        { headers: sbHeaders() },
+      );
+      const errRows = await errRes.json().catch(() => []);
+      if (Array.isArray(errRows) && errRows.length) {
+        const groups: Record<string, { n: number; users: Set<string>; kind: string; msg: string }> = {};
+        for (const e of errRows) {
+          const k = `${e.kind}|${e.message}`;
+          (groups[k] ||= { n: 0, users: new Set(), kind: e.kind, msg: e.message }).n++;
+          groups[k].users.add(e.user_name || "?");
+        }
+        const top = Object.values(groups).sort((a, b) => b.n - a.n);
+        appErrorRows = [`${errRows.length} error(s) in ${top.length} kind(s) — details: Keystone → Team Members → Chyby z aplikácie`]
+          .concat(top.slice(0, 3).map((g) => `${g.n}× ${g.kind === "save_failed" ? "save failed" : "JS error"} — ${g.msg.slice(0, 140)} (${[...g.users].slice(0, 3).join(", ")})`));
+      }
+    } catch (_e) { /* table missing / unreadable: digest still goes out */ }
+
+    const allClear = lockedOut.length === 0 && integrityIssues.length === 0 && backupOk && failedEmailCount === 0 && appErrorRows.length === 0;
 
     // ── Build + send the digest ──
     const dateLabel = today.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
@@ -220,6 +241,7 @@ serve(async (req) => {
     ${section(`🔍 Data Integrity (${integrityIssues.length})`, integrityIssues.map(esc), "No integrity issues found")}
     ${section(`💾 Backup`, backupOk ? [] : [`No daily backup snapshot found for today or yesterday — check the app is being opened daily`], `Daily snapshot present (checked ${backupKeys.join(", ")})`)}
     ${section(`📧 Email delivery (last 24h)`, failedEmailCount ? [`${failedEmailCount} transactional email(s) failed to send — check Email Log`] : [], "No failed sends in the last 24 hours")}
+    ${section(`🐞 App errors (last 24h)`, appErrorRows.map(esc), "No errors reported by the app in the last 24 hours")}
   </div>
   <div class="footer">Automated daily digest from Keystone. Change or disable this in Supabase → pg_cron.</div>
 </div></body></html>`;
