@@ -285,6 +285,13 @@ serve(async (req) => {
       case "mark_paid": {
         if (!b.code) return reply({ error: "code required" }, 400);
         if (!(await s.init())) return reply({ ok: false, error: "init failed" }, 502);
+        // Never write a payment onto an invoice that is already fully paid (2026-10-20: a client bug re-sent mark_paid
+        // thousands of times). Answer ok:false so any looping/stale client stops; the current app treats
+        // error "already_paid" as success.
+        const cur = await s.call("status", { code: String(b.code) });
+        if (cur?.status === 1 && cur.invoice_paid === "ano") {
+          return reply({ ok: false, error: "already_paid", paidAmount: num(cur.invoice_paid_amount), paidDate: cur.invoice_date_payment || null });
+        }
         const data: Record<string, unknown> = { code: String(b.code) };
         if (b.date) data.date = str(b.date, 10);
         const r = await s.call("uf", data);
