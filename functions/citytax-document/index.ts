@@ -6,7 +6,7 @@
 // The templates are the team's own Word documents (layout, fonts and city logos untouched) with {{PLACEHOLDERS}};
 // all arithmetic is in citytax_lib.mjs (shared with the local tests).
 //
-// POST { action: "generate" | "send", docs:[{ type, input:{...} }] (1-3), stampB64?, to?:[], subject?, bodyText? }
+// POST { action: "generate" | "send", docs:[{ type, input:{...} }] (1-12), stampB64?, to?:[], subject?, bodyText? }
 //   generate -> { ok, files:[{ type, filename, b64, summary }] }
 //   send     -> { ok, files:[{ type, filename, summary }], results:[{to, ok}] }   (all .docx files are attached to ONE message per recipient)
 // stampB64 = optional PNG (base64) of the taxpayer's stamp/signature, embedded in the Liptovsky Mikulas documents.
@@ -76,7 +76,7 @@ serve(async (req: Request) => {
   if (!(await callerAllowed(req))) return reply({ error: "forbidden" }, 403);
   try {
     const b = await req.json();
-    const docsIn: { type?: string; input?: unknown }[] = Array.isArray(b.docs) ? b.docs.slice(0, 3) : [];
+    const docsIn: { type?: string; input?: unknown }[] = Array.isArray(b.docs) ? b.docs.slice(0, 12) : [];
     if (!docsIn.length) return reply({ error: "docs[] required" }, 400);
     const stamp = loadStamp(b.stampB64);
     const files: { type: string; filename: string; b64: string; summary: unknown }[] = [];
