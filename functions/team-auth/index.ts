@@ -363,7 +363,10 @@ serve(async (req) => {
       );
       const rows = await r.json();
       const pending = Array.isArray(rows) ? rows[0] : null;
-      if (!pending || pending.active === true) return json({ error: "invalid_token" }, 404);
+      // An already-active member can get a fresh link (forgotten password) - activate_invite handles that case,
+      // so an active row must not be rejected here (it sent them back to the login screen, 2026-11-02).
+      // A consumed invite has its token cleared, so "token exists" is the validity check.
+      if (!pending) return json({ error: "invalid_token" }, 404);
       return json({ ok: true, name: pending.name || "", email: pending.email || "", role: pending.role || "member" });
     }
 
@@ -405,7 +408,7 @@ serve(async (req) => {
       const password = String(body.password || "");
       if (!inviteToken || password.length < 6) return json({ error: "invalid_input" }, 400);
 
-      const r = await fetch(`${SB_URL}/rest/v1/team_users?select=id,email&invite_token=eq.${encodeURIComponent(inviteToken)}&limit=1`, {
+      const r = await fetch(`${SB_URL}/rest/v1/team_users?select=id,email,auth_user_id&invite_token=eq.${encodeURIComponent(inviteToken)}&limit=1`, {
         headers: sbHeaders(),
       });
       const rows = await r.json();
@@ -413,7 +416,10 @@ serve(async (req) => {
       if (!pending) return json({ error: "invalid_token" }, 400);
 
       const hash = await pbkdf2Hash(password);
-      const authUserId = await ensureAuthUser(pending.email, password, null);
+      // An already-active member who gets a fresh invite link (forgotten password) HAS an Auth account:
+      // pass its id so the Auth password is updated too and a real session comes back. With null this
+      // tried to create a duplicate user, failed, and left the Auth password + session missing.
+      const authUserId = await ensureAuthUser(pending.email, password, pending.auth_user_id || null);
       const patch: Record<string, unknown> = { name: name || undefined, password: hash, active: true, invite_token: null, last_login: new Date().toISOString() };
       if (authUserId) patch.auth_user_id = authUserId;
       const pr = await fetch(`${SB_URL}/rest/v1/team_users?id=eq.${encodeURIComponent(pending.id)}&select=${SAFE_COLS}`, {
