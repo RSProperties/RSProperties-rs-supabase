@@ -106,6 +106,56 @@ async function clearRateLimit(key: string): Promise<void> {
   }).catch(() => {});
 }
 
+// ---------------- owner session token (HMAC-signed, no new secret needed) ----------------
+// Owners have no Supabase Auth session, and get_reports is gated only by the
+// username/email (an accepted trade-off for reports). The accounting ledger is
+// more sensitive (itemised payments + balances), so it requires this short-lived
+// token, issued only by a successful password login. The key is derived from the
+// service-role key, which never leaves this function.
+const TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
+async function tokenKey(): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode("owner-session-v1:" + SERVICE_KEY),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+}
+function b64url(s: string): string {
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function unb64url(s: string): string {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  return atob(s);
+}
+async function hmacHex(data: string): Promise<string> {
+  const sig = await crypto.subtle.sign("HMAC", await tokenKey(), new TextEncoder().encode(data));
+  return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+async function issueOwnerToken(ownerId: string): Promise<string> {
+  const p = b64url(JSON.stringify({ o: ownerId, e: Date.now() + TOKEN_TTL_MS }));
+  return p + "." + (await hmacHex(p));
+}
+async function verifyOwnerToken(tok: string): Promise<string | null> {
+  const parts = String(tok || "").split(".");
+  if (parts.length !== 2) return null;
+  if (!timingSafeEqual(await hmacHex(parts[0]), parts[1])) return null;
+  try {
+    const p = JSON.parse(unb64url(parts[0]));
+    if (!p || !p.o || !p.e || p.e < Date.now()) return null;
+    return String(p.o);
+  } catch (_e) {
+    return null;
+  }
+}
+function ledgerMonthAdd(m: string, d: number): string {
+  const [y, mo] = m.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, mo - 1 + d, 1));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   try {
@@ -162,7 +212,7 @@ serve(async (req) => {
       }
       await clearRateLimit(rlKey);
       delete o.password_hash;
-      return json({ ok: true, owner: o });
+      return json({ ok: true, owner: o, token: await issueOwnerToken(String(o.id)) });
     }
 
     // ---------------- GET OWNER'S REPORTS ----------------
@@ -204,7 +254,91 @@ serve(async (req) => {
             rep.published &&
             (propIds.indexOf(rep.propId) >= 0 || propIds.indexOf(rep.propName) >= 0)
         );
+      // Internal-only fields on expense/income lines (what we paid + our margin, copied there from Quick Log
+      // by older versions of the admin app) must never reach an owner's browser.
+      const INTERNAL = ["realAmount", "marginPct"];
+      for (const rep of reports as any[]) {
+        for (const k of ["otherExpenses", "otherIncome"]) {
+          if (!Array.isArray(rep[k])) continue;
+          rep[k] = rep[k].map((it: any) => {
+            if (!it || typeof it !== "object") return it;
+            const c = { ...it };
+            for (const f of INTERNAL) delete c[f];
+            return c;
+          });
+        }
+      }
       return json({ ok: true, reports });
+    }
+
+    // ---------------- GET OWNER'S ACCOUNTING LEDGER (published months only) ----------------
+    // Requires the signed token from a real password login (see issueOwnerToken).
+    // Returns, per property assigned to this owner, ONLY the months an admin
+    // explicitly published (ledger_publications) - with the carried balance
+    // computed here from every earlier month, so the owner sees a number that
+    // matches the admin's book without ever receiving the unpublished rows.
+    if (action === "get_ledger") {
+      const oid = await verifyOwnerToken(String(body.token || ""));
+      if (!oid) return json({ error: "bad_token" }, 401);
+      const gj = async (path: string) => {
+        const r = await fetch(`${SB_URL}/rest/v1/${path}`, { headers: sbHeaders() });
+        if (!r.ok) throw new Error(`${path} ${r.status}`);
+        return r.json();
+      };
+      try {
+        const orows = await gj(`owner_users?select=id,name,property_ids&id=eq.${encodeURIComponent(oid)}`);
+        const o = Array.isArray(orows) ? orows[0] : null;
+        const mineIds: string[] = o && Array.isArray(o.property_ids) ? o.property_ids.map((x: unknown) => String(x).trim()) : [];
+        if (!o || !mineIds.length) return json({ ok: true, ownerName: o ? o.name : "", properties: [] });
+
+        const settings = await gj("ledger_settings?select=*");
+        const mine = (Array.isArray(settings) ? settings : []).filter(
+          (s: any) => mineIds.indexOf(String(s.property_id).trim()) >= 0 || mineIds.indexOf(String(s.property_name || "").trim()) >= 0
+        );
+        const properties: any[] = [];
+        for (const s of mine) {
+          const pid = encodeURIComponent(s.property_id);
+          const pubs = await gj(`ledger_publications?select=month&property_id=eq.${pid}`);
+          const pubMonths: string[] = (Array.isArray(pubs) ? pubs : []).map((p: any) => p.month).sort();
+          if (!pubMonths.length) continue;
+          const res = await gj(`ledger_reservations?select=*&property_id=eq.${pid}&order=checkin`);
+          const ent = await gj(`ledger_entries?select=*&property_id=eq.${pid}&order=created_at`);
+          const sum = (m: string) => {
+            let revenue = 0, expenses = 0, credit = 0, missing = 0;
+            for (const r of res) if (r.month === m) { if (r.payout == null) missing++; else revenue += Number(r.payout); }
+            for (const e of ent) if (e.month === m) { if (e.kind === "credit") credit += Number(e.amount); else expenses += Number(e.amount); }
+            return { revenue, expenses, credit, missing };
+          };
+          const months = pubMonths.map((m) => {
+            let prev = 0;
+            if (m >= s.start_month) {
+              prev = Number(s.opening_balance) || 0;
+              let cur = s.start_month, guard = 0;
+              while (cur < m && guard++ < 240) { const t = sum(cur); prev += t.expenses - t.credit; cur = ledgerMonthAdd(cur, 1); }
+            }
+            const t = sum(m);
+            const item = (e: any) => ({ date: e.entry_date, category: e.category, note: e.note, amount: Number(e.amount), auto: e.source === "auto_provision" });
+            return {
+              month: m,
+              prevBalance: prev,
+              revenue: t.revenue,
+              expenses: t.expenses,
+              credit: t.credit,
+              result: t.revenue - t.expenses,
+              toPay: prev + t.expenses - t.credit,
+              missingPayouts: t.missing,
+              reservations: res.filter((r: any) => r.month === m).map((r: any) => ({ checkin: r.checkin, checkout: r.checkout, channel: r.channel, payout: r.payout == null ? null : Number(r.payout) })),
+              credits: ent.filter((e: any) => e.month === m && e.kind === "credit").map(item),
+              expenseItems: ent.filter((e: any) => e.month === m && e.kind === "expense").map(item),
+            };
+          }).sort((a: any, b: any) => b.month.localeCompare(a.month));
+          properties.push({ property_id: s.property_id, name: String(s.property_name || "").trim(), currency: s.currency || "€", months });
+        }
+        return json({ ok: true, ownerName: o.name || "", properties });
+      } catch (e) {
+        console.error("get_ledger error:", e);
+        return json({ error: "load_failed" }, 500);
+      }
     }
 
     // ---------------- REQUEST PASSWORD RESET ----------------
