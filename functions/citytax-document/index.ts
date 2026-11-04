@@ -28,12 +28,14 @@ const CORS = {
 const J = { ...CORS, "Content-Type": "application/json" };
 const reply = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: J });
 
-const FILE_LABEL: Record<string, string> = {
-  ba_month: "Mesacne_vyuctovanie_dane_za_ubytovanie",
-  lm_tax_q: "Hlasenie_dan_za_ubytovanie",
-  lm_waste_q: "Hlasenie_komunalny_odpad",
-};
-const slug = (s: string) => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+// File names follow the team's existing convention: "<label> MM_YYYY" (month/year; a slash is not allowed in file names).
+// Bratislava: "city tax BA 04_2026"; Liptovsky Mikulas quarters: "Dan_z_ubytovania 01_2026", "komunalne_odpady 01_2026".
+const FILE_PREFIX: Record<string, string> = { ba_month: "city tax BA", lm_tax_q: "Dan_z_ubytovania", lm_waste_q: "komunalne_odpady" };
+function fileNameFor(type: string, period: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(period), q = /^(\d{4})-Q([1-4])$/.exec(period);
+  const mmyyyy = m ? `${m[2]}_${m[1]}` : q ? `0${q[2]}_${q[1]}` : period;
+  return `${FILE_PREFIX[type]} ${mmyyyy}.docx`;
+}
 const esc = (x: string) => String(x).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 function b64ToBytes(b64: string): Uint8Array {
@@ -87,7 +89,7 @@ serve(async (req: Request) => {
       const { summary } = calc(type, input);
       const docx: Uint8Array = await buildDocument(JSZip, b64ToBytes(TEMPLATES[type]), type, input, type === "ba_month" ? null : stamp);
       const period = String(input.period || "").replace(/[^0-9A-Za-z-]/g, "");
-      const filename = `${FILE_LABEL[type]}_${slug(String(input.facName || input.facility || input.operator || ""))}_${period}.docx`;
+      const filename = fileNameFor(type, period);
       files.push({ type, filename, b64: bytesToB64(docx), summary });
     }
 
