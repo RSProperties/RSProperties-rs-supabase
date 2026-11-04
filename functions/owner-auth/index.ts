@@ -264,6 +264,8 @@ serve(async (req) => {
             if (!it || typeof it !== "object") return it;
             const c = { ...it };
             for (const f of INTERNAL) delete c[f];
+            // Files the team marked "internal only" (e.g. a supplier invoice that shows our purchase price) are removed here, not just hidden in the page.
+            if (Array.isArray(c.files)) c.files = c.files.filter((f: any) => !(f && f.internal));
             return c;
           });
         }
