@@ -17,6 +17,29 @@
 // tax are NOT taken from Hostex. `hostex-sync` already returns cleaning:0;
 // the frontend applies both from each property's own config.
 //
+// 2026-09-17 addition — daily live DRAFT REPORTS (not just the dashboard):
+// after refreshing `hostexLive`, also builds one real report-shaped row
+// per property for the CURRENT month and upserts it into the `reports`
+// table (same table/shape real saved reports use — see dbSaveReport() in
+// index.html), with id `r_live_<propId>_<month>` and `published:false`
+// (owner-auth's get_reports already filters on that flag, so owners never
+// see these) and `isLiveDraft:true`. Overwritten in place every run — no
+// history kept, per the user's own answer when this was scoped. Follows
+// the REAL report math (calcGrandNP/getCityTax/getExp in index.html —
+// per-channel city-tax gating via cityTaxChannels, cleaning applied once
+// per reservation same as a Bulk Sync import), NOT the simpler always-tax
+// -every-guest-night math the "Aktuálny mesiac" dashboard itself uses —
+// so the two views can legitimately disagree slightly; the live draft
+// exists specifically to look like a real report, not to restate the
+// dashboard. Quick Log entries for the property+month are folded in as a
+// single otherIncome/otherExpense line each, mirroring calcGrandNP's
+// mode:'owner'/'deduct' handling. Stale live-draft rows for months that
+// are no longer current get deleted so the table doesn't accumulate them
+// forever (the client separately excludes `r_live_` ids from
+// dbLoadReports() entirely — kept off the Saved Reports list, out of
+// report-count badges, and out of the duplicate-month-guard reports.find()
+// checks, so closing the real report later never collides with this).
+//
 // Auth: allowed if the caller presents the service role key (pg_cron) OR a
 // valid, active team member's Supabase Auth token (the "Sync teraz" button).
 //
@@ -78,6 +101,93 @@ async function callerAllowed(req: Request): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function isBDC(source: string): boolean {
+  return (source || "").toLowerCase().indexOf("booking.com") >= 0;
+}
+function shouldAutoCityTax(source: string, cityTaxChannels: string[]): boolean {
+  if (isBDC(source)) return true;
+  return Array.isArray(cityTaxChannels) && cityTaxChannels.indexOf((source || "").trim()) >= 0;
+}
+
+// Builds one report-shaped object for `prop` + `month`, following the same
+// math as saveReport()/calcGrandNP()/getCityTax()/getExp() in index.html —
+// see the file-header comment for why that's a deliberate choice over the
+// simpler "Aktuálny mesiac" dashboard math.
+function buildLiveDraftReport(
+  prop: any,
+  reservations: any[],
+  quickLogRows: any[],
+  month: string,
+  syncedAt: string,
+): any {
+  const cityTaxChannels: string[] = Array.isArray(prop.cityTaxChannels) ? prop.cityTaxChannels : [];
+  const defaultCleaning = Number(prop.defaultCleaning) || 0;
+  const feePct = Number(prop.fee) || 0;
+  const taxPerGN = Number(prop.taxPerGuestNight) || 0;
+
+  const reps = reservations.map((r) => {
+    const nights = Number(r.nights) || 0;
+    const guests = Number(r.guests) || 0;
+    const income = Number(r.income) || 0;
+    const cityTax = shouldAutoCityTax(r.source, cityTaxChannels) ? nights * guests * taxPerGN : 0;
+    // Cleaning applies once per reservation/stay, same rule the property
+    // popup and Bulk Sync already use — not gated by which month the
+    // checkout falls in (that nuance is the dashboard's own, separate rule).
+    const cleaning = r.cleaning ? Number(r.cleaning) : defaultCleaning;
+    return { r, cleaning, cityTax, netIncome: income - cityTax };
+  });
+
+  const totalIncome = reps.reduce((s, x) => s + (Number(x.r.income) || 0), 0);
+  const totalCityTax = reps.reduce((s, x) => s + x.cityTax, 0);
+  const totalCleaning = reps.reduce((s, x) => s + x.cleaning, 0);
+  const totalNights = reps.reduce((s, x) => s + (Number(x.r.nights) || 0), 0);
+
+  // Quick Log for this property + month — folded in as a single
+  // otherIncome/otherExpense line each, mirroring calcGrandNP's
+  // mode:'owner'/'deduct' defaults for a manually-added row.
+  const qlRows = quickLogRows.filter((q) => q && q.propId === prop.id && q.month === month);
+  const qlIncome = qlRows.filter((q) => q.type === "income").reduce((s, q) => s + (Number(q.amount) || 0), 0);
+  const qlExpense = qlRows.filter((q) => q.type !== "income").reduce((s, q) => s + (Number(q.amount) || 0), 0);
+  const otherIncome = qlIncome > 0 ? [{ id: "ql_income", label: "Quick Log", amount: qlIncome, mode: "owner" }] : [];
+  const otherExpenses = qlExpense > 0 ? [{ id: "ql_expense", label: "Quick Log", amount: qlExpense, mode: "deduct" }] : [];
+
+  const feeBase = reps.reduce((s, x) => s + x.netIncome, 0) + qlIncome;
+  const mgmt = feeBase * (feePct / 100);
+  const allExp = totalCleaning + qlExpense;
+  const totalNI = reps.reduce((s, x) => s + x.netIncome, 0) + qlIncome;
+  const finalNP = totalNI - mgmt - allExp;
+
+  const cleanReservations = reps.map((x) => ({ ...x.r, cleaning: x.cleaning }));
+  const id = `r_live_${prop.id}_${month}`;
+
+  return {
+    id, month, propId: prop.id, propName: prop.name || "",
+    published: false, isLiveDraft: true,
+    reportColumns: [],
+    owner: prop.owner || "", fee: String(feePct), cur: "€",
+    taxRate: String(taxPerGN), cityTaxChannels,
+    notes: "[]", otherExpenses, otherIncome, attachments: [],
+    portalShowChannel: true, portalShowGuest: true, portalShowCheckin: true, portalShowCheckout: true,
+    portalShowNights: true, portalShowBooked: true, portalShowGuests: true, portalShowRoomRate: true,
+    portalShowIncome: true, portalShowMgmt: true, portalShowCleaning: true, portalShowCityTax: true,
+    portalShowExtraExp: true, portalShowExtraInc: true, portalShowPayout: true, portalShowNP: true,
+    income: totalIncome.toFixed(2), netProfit: finalNP.toFixed(2),
+    _calc: {
+      tInc: Math.round(totalIncome * 100) / 100,
+      tCT: Math.round(totalCityTax * 100) / 100,
+      payout: Math.round((totalIncome - totalCityTax) * 100) / 100,
+      tMgmt: Math.round(mgmt * 100) / 100,
+      tCleaning: Math.round(totalCleaning * 100) / 100,
+      grandNP: Math.round(finalNP * 100) / 100,
+      tNights: totalNights,
+      tBooks: reps.length,
+    },
+    reservations: cleanReservations,
+    columns: [],
+    savedAt: syncedAt,
+  };
 }
 
 // Run `jobs` with at most `n` in flight at once.
@@ -182,8 +292,59 @@ serve(async (req) => {
     });
   }
 
+  // 4. Live draft reports — current month only, one row per property with
+  //    a hostexPropertyId. Best-effort: a failure here must never take
+  //    down the hostexLive sync above, which already succeeded and
+  //    returned 200 by this point from the caller's perspective.
+  let liveDraftCount = 0;
+  const liveDraftErrors: Record<string, string> = {};
+  try {
+    const [qlRow, qlDeletedRow] = await Promise.all([
+      fetch(`${SB_URL}/rest/v1/workspace?select=value&key=eq.quickLog`, { headers: sbHeaders() }).then((r) => r.json()).catch(() => []),
+      fetch(`${SB_URL}/rest/v1/workspace?select=value&key=eq.quickLog_deleted`, { headers: sbHeaders() }).then((r) => r.json()).catch(() => []),
+    ]);
+    const qlAll: any[] = Array.isArray(qlRow) && Array.isArray(qlRow[0]?.value) ? qlRow[0].value : [];
+    const qlDeleted: any[] = Array.isArray(qlDeletedRow) && Array.isArray(qlDeletedRow[0]?.value) ? qlDeletedRow[0].value : [];
+    const quickLogRows = qlAll.filter((q) => q && qlDeleted.indexOf(q.id) < 0);
+
+    const curByProp = byMonth[cur]?.byProp || {};
+    const draftWrites: any[] = [];
+    for (const p of targets) {
+      try {
+        const rep = buildLiveDraftReport(p, curByProp[p.id] || [], quickLogRows, cur, payload.syncedAt);
+        draftWrites.push({ id: rep.id, month: rep.month, prop_id: rep.propId, prop_name: rep.propName, data: rep, saved_at: rep.savedAt });
+        liveDraftCount++;
+      } catch (e) {
+        liveDraftErrors[p.id] = String(e);
+      }
+    }
+
+    if (draftWrites.length) {
+      const dw = await fetch(`${SB_URL}/rest/v1/reports`, {
+        method: "POST",
+        headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify(draftWrites),
+      });
+      if (!dw.ok) liveDraftErrors["_write"] = (await dw.text()).slice(0, 300);
+    }
+
+    // Drop live-draft rows for months that are no longer current — "latest
+    // version only, no history" per how this feature was scoped. PostgREST
+    // `like` treats `*` as the SQL `%` wildcard (same convention already
+    // used for the workspace backup_* exclusion in preflight.sh).
+    await fetch(`${SB_URL}/rest/v1/reports?id=like.r_live_*&month=neq.${encodeURIComponent(cur)}`, {
+      method: "DELETE",
+      headers: sbHeaders(),
+    }).catch(() => {});
+  } catch (e) {
+    liveDraftErrors["_fatal"] = String(e);
+  }
+
   return new Response(
-    JSON.stringify({ ok: true, months, propertyCount: targets.length, reservationCount: total, errorCount: Object.keys(errors).length }),
+    JSON.stringify({
+      ok: true, months, propertyCount: targets.length, reservationCount: total, errorCount: Object.keys(errors).length,
+      liveDraftCount, liveDraftErrorCount: Object.keys(liveDraftErrors).length,
+    }),
     { headers: JSON_HEADERS, status: 200 },
   );
 });

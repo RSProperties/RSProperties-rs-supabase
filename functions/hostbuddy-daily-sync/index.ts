@@ -96,6 +96,33 @@ async function fetchAllIncomplete(): Promise<{ items: any[]; error?: string }> {
   return { items };
 }
 
+// Conversations: the API has no pagination and returns the 100 most recent per call, so besides the
+// unfiltered call we also ask per big channel (a quiet channel would otherwise be pushed out by chatty
+// ones) and merge by conversation_id. "Waiting for our reply" = the last message came from the guest.
+async function fetchConversations(): Promise<{ awaiting: any[]; fetched: number; senders: Record<string, number>; error?: string }> {
+  const urls = ["", "&channel=airbnb", "&channel=bookingcom"].map((q) => `${HOSTBUDDY_BASE}/conversations?limit=100${q}`);
+  const all = new Map<string, any>();
+  let error: string | undefined;
+  for (const u of urls) {
+    try {
+      const r = await fetch(u, { headers: { "X-API-Key": HOSTBUDDY_API_KEY } });
+      if (!r.ok) { error = `http_${r.status}`; continue; }
+      const j = await r.json().catch(() => null);
+      (Array.isArray(j?.data) ? j.data : []).forEach((c: any) => { if (c?.conversation_id) all.set(c.conversation_id, c); });
+    } catch (e) { error = String(e).slice(0, 120); }
+  }
+  const senders: Record<string, number> = {};
+  all.forEach((c) => { const k = String(c.last_message_sender || "?"); senders[k] = (senders[k] || 0) + 1; });
+  const awaiting = [...all.values()]
+    .filter((c) => String(c.last_message_sender || "").toLowerCase() === "guest")
+    .map((c) => ({
+      conversation_id: c.conversation_id, guest_name: c.guest_name || "", channel: c.channel || "",
+      property_name: c.property_name || "", reservation_id: c.reservation_id || "",
+      last_message_time_utc: c.last_message_time_utc || "", sentiment: c.sentiment || "", message_count: c.message_count || 0,
+    }));
+  return { awaiting, fetched: all.size, senders, error };
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
   if (!(await callerAllowed(req))) {
@@ -106,6 +133,12 @@ serve(async (req) => {
   }
 
   const { items, error } = await fetchAllIncomplete();
+  const convs = await fetchConversations();
+  await fetch(`${SB_URL}/rest/v1/workspace`, {
+    method: "POST",
+    headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify({ key: "hostbuddyConvs", value: { syncedAt: new Date().toISOString(), fetched: convs.fetched, senders: convs.senders, error: convs.error ?? null, awaiting: convs.awaiting } }),
+  }).catch(() => {});
 
   const payload = {
     syncedAt: new Date().toISOString(),
@@ -125,7 +158,7 @@ serve(async (req) => {
   }
 
   return new Response(
-    JSON.stringify({ ok: !error, itemCount: items.length, error: error ?? undefined }),
+    JSON.stringify({ ok: !error, itemCount: items.length, awaiting: convs.awaiting.length, fetched: convs.fetched, error: error ?? undefined }),
     { headers: JSON_HEADERS, status: error ? 502 : 200 },
   );
 });

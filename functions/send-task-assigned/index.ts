@@ -4,6 +4,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { logResend } from "../_shared/email_log.ts";
+import { callerAllowed } from "../_shared/caller_auth.ts";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -14,6 +15,16 @@ const CORS = {
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: CORS });
+  }
+
+  // AUTH (2026-10-20): this function used to accept ANY caller holding the public anon key, i.e. an
+  // open relay for email from our own domain. Now: service role (e.g. owner-auth) or an ACTIVE team
+  // member's token only - the admin app sends window._authToken.
+  if (!(await callerAllowed(req))) {
+    return new Response(JSON.stringify({ error: "forbidden" }), {
+      headers: { ...CORS, "Content-Type": "application/json" },
+      status: 403,
+    });
   }
 
   try {

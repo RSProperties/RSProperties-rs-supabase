@@ -182,6 +182,10 @@ serve(async (req) => {
         guests:      Number(r.number_of_guests ?? 2),
         roomrate:    Math.round(roomrate * ratio * 100) / 100,
         income:      Math.round(income  * ratio * 100) / 100,
+        // Whole-reservation payout (payment.total_amount), NOT prorated by month: the accounting
+        // ledger books a stay entirely in its check-in month, so it needs the full figure even for a
+        // stay that spills into the next month. Additive field - existing consumers ignore it.
+        payout:      Math.round(income * 100) / 100,
         cleaning:    0,   // applied from property defaultCleaning on the frontend
         extra:       {},
         extraIncome: {},

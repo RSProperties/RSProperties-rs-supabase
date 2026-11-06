@@ -70,6 +70,7 @@ async function callerAllowed(req: Request): Promise<boolean> {
 
 interface EquipItem { name: string; count?: string; status?: string; note?: string; }
 interface ChkItem { text: string; ok?: boolean; note?: string; }
+interface BuildItem { name: string; value?: string; note?: string; }
 interface TodoItem { task?: string; owner?: string; note?: string; }
 interface Payload {
   name?: string; address?: string; date?: string;
@@ -80,6 +81,7 @@ interface Payload {
   insurance?: string; registrationNote?: string;
   quickCheck?: ChkItem[]; strMin?: ChkItem[];
   kitchen?: EquipItem[]; living?: EquipItem[]; bathroom?: EquipItem[];
+  building?: BuildItem[];
   todos?: TodoItem[]; notes?: string;
 }
 
@@ -172,6 +174,18 @@ function equipTable(items: EquipItem[]) {
     ...items.map((it, i) => new TableRow({ children: [
       bodyCell(it.name, widths[0], true, i % 2 === 1), bodyCell(it.count || "", widths[1], false, i % 2 === 1),
       bodyCell(it.status || "", widths[2], false, i % 2 === 1), bodyCell(it.note || "", widths[3], false, i % 2 === 1),
+    ] })),
+  ];
+  return new Table({ width: { size: TABLE_WIDTH, type: WidthType.DXA }, columnWidths: widths, alignment: AlignmentType.CENTER, rows });
+}
+// Yes/No rows (building features and house rules): value "ano" / "nie" / "" (not answered yet).
+function yesNoTable(items: BuildItem[]) {
+  const widths = [4200, 2200, 3912];
+  const mark = (v?: string) => (v === "ano" ? "\u2611 \u00c1no   \u2610 Nie" : v === "nie" ? "\u2610 \u00c1no   \u2611 Nie" : "\u2610 \u00c1no   \u2610 Nie");
+  const rows = [
+    new TableRow({ children: [headerCell("Polo\u017eka", widths[0]), headerCell("\u00c1no / Nie", widths[1]), headerCell("Pozn\u00e1mka", widths[2])] }),
+    ...items.map((it, i) => new TableRow({ children: [
+      bodyCell(it.name, widths[0], true, i % 2 === 1), bodyCell(mark(it.value), widths[1], false, i % 2 === 1), bodyCell(it.note || "", widths[2], false, i % 2 === 1),
     ] })),
   ];
   return new Table({ width: { size: TABLE_WIDTH, type: WidthType.DXA }, columnWidths: widths, alignment: AlignmentType.CENTER, rows });
@@ -298,6 +312,10 @@ function buildDoc(p: Payload) {
     heading("Vybavenie apartmánu - kúpeľňa a údržba"),
     equipTable(p.bathroom || []),
     new Paragraph({ text: "" }),
+
+    ...(p.building && p.building.length
+      ? [heading("Budova, parkovanie a pravidlá"), yesNoTable(p.building), new Paragraph({ text: "" })]
+      : []),
 
     heading("Čo treba doplniť pred štartom"),
   ];
