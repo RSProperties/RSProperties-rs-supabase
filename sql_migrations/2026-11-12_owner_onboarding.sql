@@ -136,6 +136,8 @@ begin
     if a is not null and not vyb ? a then vyb := vyb || to_jsonb(a); end if;
   end loop;
   if lower(coalesce(p->>'pets','')) in ('yes','áno','ano') and not vyb ? 'Domáce zvieratá povolené' then vyb := vyb || to_jsonb('Domáce zvieratá povolené'::text); end if;
+  if lower(coalesce(p->>'lift','')) in ('yes','áno','ano') and not vyb ? 'Výťah' then vyb := vyb || to_jsonb('Výťah'::text); end if;
+  if lower(coalesce(p->>'balcony','')) in ('yes','áno','ano') and not vyb ? 'Balkón/Terasa' then vyb := vyb || to_jsonb('Balkón/Terasa'::text); end if;
   if lower(coalesce(p->>'parking','')) like 'private%' and not vyb ? 'Súkromné parkovanie' then vyb := vyb || to_jsonb('Súkromné parkovanie'::text); end if;
 
   -- vyžiadané služby
@@ -152,7 +154,9 @@ begin
   summary := array_to_string(array_remove(array[
       case when coalesce(p->>'ptype','') <> '' then 'Typ: ' || (p->>'ptype') end,
       case when coalesce(p->>'guests','') <> '' then 'Max. hostí: ' || (p->>'guests') end,
-      case when coalesce(p->>'floor','') <> '' then 'Poschodie / výťah: ' || (p->>'floor') end,
+      case when coalesce(p->>'floor','') <> '' then 'Poschodie: ' || (p->>'floor') end,
+      case when coalesce(p->>'lift','') <> '' then 'Výťah v budove: ' || (p->>'lift') end,
+      case when coalesce(p->>'balcony','') <> '' then 'Balkón / terasa: ' || (p->>'balcony') end,
       case when coalesce(p->>'area','') <> '' then 'Plocha: ' || (p->>'area') || ' m²' end,
       case when coalesce(nullif(p->>'parkingLabel',''), nullif(p->>'parking','')) is not null then 'Parkovanie: ' || coalesce(nullif(p->>'parkingLabel',''), p->>'parking') end,
       case when coalesce(p->>'ready','') <> '' then 'Pripravená na obhliadku a fotenie: ' || (p->>'ready') end,

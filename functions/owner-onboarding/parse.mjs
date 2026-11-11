@@ -41,6 +41,8 @@ export function cleanForm(body) {
     services: (Array.isArray(b.services) ? b.services : []).map(String).filter((s, i, a) => SERVICES.includes(s) && a.indexOf(s) === i),
     consent: b.consent === true,
     listed: yn(b.listed),
+    lift: yn(b.lift),
+    balcony: yn(b.balcony),
     pid: /^[A-Za-z0-9_-]{1,40}$/.test(String(b.pid || "")) ? String(b.pid) : "",
     ptk: /^[a-f0-9]{16,64}$/.test(String(b.ptk || "")) ? String(b.ptk) : "",
   };
