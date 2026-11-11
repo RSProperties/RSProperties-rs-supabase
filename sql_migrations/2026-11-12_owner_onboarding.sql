@@ -447,13 +447,13 @@ begin
     notifs := jsonb_build_array(jsonb_build_object('id','ntf_'||substr(md5(random()::text||uid),1,10),'forUserId',uid,'type','task_assign',
               'title',ntf_title,'body',ntf_body,'taskId',main_task,'link',null,'read',false,'ts',now_ms)) || notifs;
   end loop;
-  if jsonb_array_length(notifs) > 500 then notifs := (select jsonb_agg(e) from (select e from jsonb_array_elements(notifs) with ordinality t(e, o) order by o limit 500) s); end if;
+  if jsonb_array_length(notifs) > 500 then notifs := (select jsonb_agg(e) from (select e from jsonb_array_elements(notifs) with ordinality t(e, ord) order by ord limit 500) s); end if;
 
   -- záznam o odoslaní
   olog := jsonb_build_array(jsonb_build_object('id', 'ol' || substr(md5(random()::text), 1, 8), 'ts', now_ms, 'name', v_name, 'email', v_email,
             'address', v_addr, 'ownerId', owner_id, 'propId', prop_id, 'leadId', coalesce(lead_id, ''), 'ownerNew', owner_new, 'propNew', prop_new, 'linked', linked,
             'services', to_jsonb(svc_labels), 'lang', coalesce(p->>'lang','sk'))) || olog;
-  if jsonb_array_length(olog) > 150 then olog := (select jsonb_agg(e) from (select e from jsonb_array_elements(olog) with ordinality t(e, o) order by o limit 150) s); end if;
+  if jsonb_array_length(olog) > 150 then olog := (select jsonb_agg(e) from (select e from jsonb_array_elements(olog) with ordinality t(e, ord) order by ord limit 150) s); end if;
 
   update workspace set value = owners where key = 'owners';
   update workspace set value = props  where key = 'properties';
