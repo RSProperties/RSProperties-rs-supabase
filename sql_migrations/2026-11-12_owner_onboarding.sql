@@ -6,7 +6,8 @@
 --   owners      majiteľ (existujúci sa nájde podľa e-mailu / telefónu a len sa doplní, inak vznikne nový)
 --   properties  nehnuteľnosť v stave „Onboarding“ (odpovede z formulára + vybavenie), duplicita adresy u toho istého majiteľa sa nezdvojí
 --   bizLeads    akvizičný lead (stupeň „Kvalifikácia“, zdroj „Onboarding formulár“); existujúci lead rovnakého e-mailu sa len doplní
---               + firemný záznam majiteľa so zákazkami „žiadosť o cenovú ponuku“ za každú vyžiadanú službu (fotenie, smart zámok…)
+--               + vyžiadané služby (fotenie, smart zámok…) ostávajú na akvizičnom leade v `requestedServices`; z nich sa v Keystone pripraví JEDNA ponuka
+--               (od 2026-11-24 sa už nevytvára firemný záznam ani zákazky za každú službu)
 --   tasks       „Onboarding majiteľa“ pre zodpovedného (striedanie podľa leadIntakeCfg) + „Pripraviť cenovú ponuku“ pri službách
 --   clRuns      onboarding checklist (ak existuje šablóna), položky ktoré formulár už splnil sú odškrtnuté
 --   notifs      zvonček
