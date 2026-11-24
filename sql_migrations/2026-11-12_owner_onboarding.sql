@@ -247,15 +247,6 @@ begin
     end if;
   end loop;
 
-  -- firemný záznam majiteľa (zákazky o služby)
-  if array_length(svc_labels, 1) > 0 then
-    for i in 0 .. jsonb_array_length(leads) - 1 loop
-      l := leads->i;
-      continue when coalesce(l->>'type','acquisition') <> 'company';
-      if v_email <> '' and lower(btrim(coalesce(l->>'contactEmail',''))) = v_email then co_i := i; exit; end if;
-    end loop;
-  end if;
-
   if v_dry then
     return jsonb_build_object('ok', true, 'dry', true, 'ownerExists', owner_i >= 0, 'propertyExists', prop_i >= 0,
       'leadExists', lead_i >= 0, 'services', to_jsonb(svc_labels),
@@ -342,7 +333,7 @@ begin
     l := jsonb_set(l, '{updatedAt}', to_jsonb(now_ms), true);
     l := jsonb_set(l, '{nextFollowUp}', to_jsonb(today::text), true);
     leads := jsonb_set(leads, array[lead_i::text], l);
-  elsif not linked then
+  elsif not linked or array_length(svc_labels, 1) > 0 then
     lead_new := true;
     lead_id := 'bo' || substr(md5(random()::text || clock_timestamp()::text), 1, 10);
     l := jsonb_build_object('id', lead_id, 'type', 'acquisition', 'name', v_name || ' — ' || left(v_addr, 80),
@@ -358,33 +349,20 @@ begin
     leads := jsonb_build_array(l) || leads;
   end if;
 
-  -- ---------- zákazky o služby (firemný záznam majiteľa)
-  if array_length(svc_labels, 1) > 0 then
-    deals := '[]'::jsonb;
-    foreach svc_label in array svc_labels loop
-      deal_id := 'bd' || substr(md5(random()::text || svc_label), 1, 9);
-      if deal_first = '' then deal_first := deal_id; end if;
-      deals := deals || jsonb_build_array(jsonb_build_object('id', deal_id, 'title', svc_label || ' — ' || left(v_addr, 80),
-        'direction', 'client', 'desc', 'Žiadosť o cenovú ponuku z onboarding formulára. Nehnuteľnosť: ' || v_addr || '. Majiteľ: ' || v_name || '.',
-        'amount', null, 'stage', 'new', 'lost', false, 'lostReason', '', 'nextFollowUp', (today + 1)::text, 'createdAt', now_ms, 'updatedAt', now_ms));
+  -- ---------- požadované služby: ostávajú na akvizičnom leade (majiteľ nehnuteľnosti ide do Akvizície, nie do Firiem a dodávateľov);
+  -- z celého zoznamu sa potom pripraví JEDNA cenová ponuka (`bizQuoteFromServices` v Keystone), nie ponuka za každú službu zvlášť
+  if array_length(svc_labels, 1) > 0 and coalesce(lead_id, '') <> '' then
+    for i in 0 .. jsonb_array_length(leads) - 1 loop
+      if (leads->i)->>'id' = lead_id then
+        l := leads->i;
+        l := jsonb_set(l, '{requestedServices}', (
+          select coalesce(jsonb_agg(distinct e), '[]'::jsonb)
+          from jsonb_array_elements(coalesce(l->'requestedServices', '[]'::jsonb) || to_jsonb(svc_labels)) e), true);
+        l := jsonb_set(l, '{updatedAt}', to_jsonb(now_ms), true);
+        leads := jsonb_set(leads, array[i::text], l);
+        exit;
+      end if;
     end loop;
-    if co_i >= 0 then
-      l := leads->co_i; co_id := l->>'id';
-      l := jsonb_set(l, '{deals}', coalesce(l->'deals','[]'::jsonb) || deals, true);
-      l := jsonb_set(l, '{updatedAt}', to_jsonb(now_ms), true);
-      leads := jsonb_set(leads, array[co_i::text], l);
-    else
-      co_new := true;
-      co_id := 'bc' || substr(md5(random()::text || clock_timestamp()::text), 1, 10);
-      l := jsonb_build_object('id', co_id, 'type', 'company', 'name', v_name, 'companyWhat', 'Majiteľ nehnuteľnosti (onboarding)',
-        'contactName', v_name, 'contactEmail', v_email, 'contactPhone', v_phone, 'location', coalesce(nullif(v_city,''), ''),
-        'source', 'Onboarding formulár', 'ownerId', owner_id,
-        'assignedTo', coalesce(asg_name,''), 'assignedToId', coalesce(asg_id,''),
-        'deals', deals, 'createdAt', now_ms, 'updatedAt', now_ms,
-        'notes', jsonb_build_array(jsonb_build_object('id','bn'||substr(md5(random()::text),1,8),'text','Žiadosť o služby z onboarding formulára: ' || array_to_string(svc_labels, ', '),'author','Onboarding formulár','ts',now_ms)),
-        'files', '[]'::jsonb);
-      leads := jsonb_build_array(l) || leads;
-    end if;
   end if;
 
   -- ---------- úlohy
@@ -411,7 +389,7 @@ begin
     tasks := jsonb_build_array(jsonb_build_object(
       'id', quote_task, 'title', '💶 Pripraviť cenovú ponuku: ' || array_to_string(svc_labels, ', ') || ' — ' || left(v_addr, 60),
       'desc', 'Majiteľ ' || v_name || ' požiadal v onboarding formulári o: ' || array_to_string(svc_labels, ', ')
-              || E'.\nZákazky sú v Obchod a marketing → Firmy a dodávatelia (záznam „' || v_name || '“). Cenovú ponuku vytvor v Protokole nehnuteľnosti (ponuka vybavenia) alebo cez ponuku firmy. Faktúru vystav ručne po schválení ponuky.',
+              || E'.\nJe to jedna cenová ponuka so všetkými službami: v Obchod a marketing → Akvizícia nehnuteľností otvor lead „' || v_name || '“ a klikni na „💶 Pripraviť ponuku zo služieb“. Ceny, ktoré nie sú v katalógu, doplň v ponuke. Faktúru vystav po schválení ponuky.',
       'status', 'todo', 'priority', 'M',
       'assigneeIds', case when asg_id is not null then jsonb_build_array(asg_id) else '[]'::jsonb end,
       'assignees',   case when asg_name is not null then jsonb_build_array(asg_name) else '[]'::jsonb end,
@@ -420,7 +398,7 @@ begin
       'dueDate', (today + 1)::text, 'recurring', '', 'parentId', '',
       'createdAt', now_ms, 'updatedAt', now_ms, 'completedAt', null,
       'createdById', '', 'createdByName', 'Onboarding formulár',
-      'comments', '[]'::jsonb, 'files', '[]'::jsonb, 'source', 'onboarding_quote', 'leadId', co_id, 'dealId', deal_first)) || tasks;
+      'comments', '[]'::jsonb, 'files', '[]'::jsonb, 'source', 'onboarding_quote', 'leadId', coalesce(lead_id, ''), 'dealId', '')) || tasks;
   end if;
 
   -- ---------- checklist (iba ak existuje onboarding šablóna a nehnuteľnosť je nová)
